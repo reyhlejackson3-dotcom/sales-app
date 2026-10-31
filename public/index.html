@@ -420,6 +420,16 @@ input[aria-invalid='true'] { border-color: var(--bad); box-shadow: 0 0 0 3px var
 .sec-title { font-family: var(--font-display); font-size: 2rem; font-weight: 600; line-height: 1.1; }
 .sub { color: var(--muted); }
 .tool-page { align-content: start; }
+.page.wide-split { max-width: 1480px; }
+.split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; align-items: start; }
+.split.on { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.split-pane { display: grid; gap: 14px; align-content: start; min-width: 0; }
+.split-right { position: sticky; top: calc(16px + var(--banner-h, 0px)); max-height: calc(100vh - 32px - var(--banner-h, 0px)); overflow-y: auto; padding: 0 4px 110px 0; }
+.card.lead.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-line); }
+@media (max-width: 900px) {
+  .split.on { grid-template-columns: minmax(0, 1fr); }
+  .split-right { order: -1; position: static; max-height: none; overflow: visible; padding: 0; }
+}
 .back { color: var(--muted); text-decoration: none; font-size: .9rem; width: fit-content; }
 .back:hover { color: var(--accent-d); }
 .stack { display: grid; gap: 14px; }
@@ -1656,6 +1666,79 @@ async function copyText(text, msg = 'Copied.') {
 }
 const goto = (hash) => { location.hash = hash; };
 
+/* ---------------- Shared: quick log card, prep runner, prep results ---------------- */
+const LOG_OUT = [['no_answer', 'No answer'], ['talked', 'Talked'], ['meeting', 'Meeting booked'], ['sale', 'Sale']];
+
+function addLogRow({ business, outcome, amount = 0, note = '' }) {
+  const row = { id: db.uid(), at: new Date().toISOString(), business: business || 'Unnamed call', outcome, amount: outcome === 'sale' ? amount || 0 : 0, note };
+  db.kv.set('log', [row, ...db.kv.get('log', [])].slice(0, 500));
+  db.kv.set('last_biz', business || '');
+  return row;
+}
+
+/** Small pop-up card to log a call without leaving the page. Closes itself once the call is logged. */
+function quickLog(name) {
+  if (plan.cur().log === 'none') { upgradeModal('The sales log is not part of your plan.', 'pro'); return; }
+  const full = plan.cur().log === 'full';
+  let close = () => {};
+  const biz = h('input', { type: 'text', placeholder: 'Business name', autocomplete: 'off', value: name || '' });
+  const note = full ? h('input', { type: 'text', placeholder: 'Note (optional)', maxlength: '200', autocomplete: 'off' }) : null;
+  const amount = h('input', { type: 'number', inputmode: 'decimal', min: '0', step: '1', placeholder: 'Sale amount, $' });
+  const finish = (outcome, amt) => {
+    addLogRow({ business: biz.value.trim(), outcome, amount: amt, note: note ? note.value.trim() : '' });
+    toast(`Logged: ${LOG_OUT.find((o) => o[0] === outcome)[1]}.`);
+    close();
+  };
+  const outs = h('div', { class: 'outs' }, LOG_OUT.map(([id, text]) => h('button', { class: 'out-btn', type: 'button',
+    onclick: () => { if (id === 'sale') { outs.hidden = true; saleRow.hidden = false; amount.focus(); } else finish(id); } }, text)));
+  const saleRow = h('div', { class: 'stack', hidden: true },
+    h('label', { class: 'field' }, 'Sale amount', amount),
+    h('div', { class: 'row' },
+      h('button', { class: 'btn', type: 'button', onclick: () => finish('sale', Number(amount.value) || 0) }, 'Save sale'),
+      h('button', { class: 'btn ghost', type: 'button', onclick: () => { saleRow.hidden = true; outs.hidden = false; } }, 'Back')));
+  amount.addEventListener('keydown', (e) => { if (e.key === 'Enter') finish('sale', Number(amount.value) || 0); });
+  close = modal(h('div', { class: 'stack' },
+    h('h2', { class: 'sec-title' }, 'Log this call'),
+    h('label', { class: 'field' }, 'Who did you call?', biz),
+    note ? h('label', { class: 'field' }, 'Note', note) : null,
+    h('p', { class: 'note' }, 'Tap what happened:'),
+    outs, saleRow));
+}
+
+/** Calls /api/prep and records the result in recent preps. The caller must plan.gate('preps', key) first. */
+async function runPrep({ url, sells, category, pastedText, demo, key }) {
+  const j = await apiPost('/api/prep', { url: url || 'example.com', sells, category, pastedText: pastedText || undefined, demo: demo === true });
+  plan.addKeys('preps', [key]);
+  const list = db.kv.get('preps', []).filter((e) => e.host !== key);
+  list.unshift({ host: key, at: new Date().toISOString(), data: j });
+  db.kv.set('preps', list.slice(0, 30));
+  return j;
+}
+
+/** The prep result cards, as an array of nodes. onLog (optional) runs when "Log this call" is pressed. */
+function prepResultNodes(j, label, { sells = '', category = '', onLog } = {}) {
+  const scriptText = j.script.join('\n');
+  return [
+    h('div', { class: 'card stack' },
+      h('div', { class: 'row-between' }, h('h2', { class: 'sec-title' }, j.business.name || label), j.demo ? h('span', { class: 'tag' }, 'Sample data') : h('span', { class: 'note' }, `Read ${j.pages} page${j.pages === 1 ? '' : 's'}`)),
+      j.business.what_they_do ? h('p', {}, j.business.what_they_do) : null,
+      j.business.notable ? h('p', { class: 'note' }, `Worth mentioning: ${j.business.notable}`) : null),
+    j.angle ? h('div', { class: 'card stack' }, h('h3', {}, 'Your angle'), h('p', {}, j.angle), h('p', { class: 'note' }, `For: ${j.sells || 'your offer'}`)) : null,
+    h('div', { class: 'card stack' }, h('h3', {}, 'Likely pains'), h('p', { class: 'note' }, 'These are guesses from their website, not facts. Confirm them on the call.'),
+      j.pains.map((x) => h('div', { class: 'pain' }, h('b', {}, x.pain), h('span', { class: 'note' }, x.why)))),
+    h('div', { class: 'card stack' },
+      h('div', { class: 'row-between' }, h('h3', {}, 'Opener'), h('button', { class: 'btn ghost sm', type: 'button', onclick: () => copyText(j.opener) }, 'Copy')),
+      h('div', { class: 'quote' }, j.opener),
+      h('div', { class: 'row-between' }, h('h3', {}, 'Short script'), h('button', { class: 'btn ghost sm', type: 'button', onclick: () => copyText(scriptText, 'Script copied.') }, 'Copy')),
+      h('div', { class: 'quote script' }, j.script.map((l) => h('p', {}, l)))),
+    h('div', { class: 'card stack' }, h('h3', {}, 'Ask these'), h('ul', { class: 'stack', style: { margin: 0, paddingLeft: '20px' } }, j.questions.map((q) => h('li', {}, q))),
+      j.watch_out ? h('p', { class: 'note' }, `Watch out: ${j.watch_out}`) : null),
+    h('div', { class: 'row' },
+      onLog && plan.cur().log !== 'none' ? h('button', { class: 'btn', type: 'button', onclick: onLog }, 'Log this call') : null,
+      h('button', { class: 'btn ghost', type: 'button', onclick: () => { db.kv.set('practice_ctx', { name: j.business.name || label, what_they_do: j.business.what_they_do, notable: j.business.notable, pains: j.pains.map((x) => (x.why ? `${x.pain} (${x.why})` : x.pain)), sells: j.sells || sells, category, host: j.host }); goto('#/practice'); } }, 'Practice this call')),
+  ].filter(Boolean);
+}
+
 /* ---------------- Call prep ---------------- */
 const prepPage = (() => {
   async function mount(view) {
@@ -1678,25 +1761,8 @@ const prepPage = (() => {
     const drawMeter = () => meter.replaceChildren(usageRows(['preps']));
 
     function renderPrep(j, label) {
-      const scriptText = j.script.join('\n');
-      out.replaceChildren(
-        h('div', { class: 'card stack' },
-          h('div', { class: 'row-between' }, h('h2', { class: 'sec-title' }, j.business.name || label), j.demo ? h('span', { class: 'tag' }, 'Sample data') : h('span', { class: 'note' }, `Read ${j.pages} page${j.pages === 1 ? '' : 's'}`)),
-          j.business.what_they_do ? h('p', {}, j.business.what_they_do) : null,
-          j.business.notable ? h('p', { class: 'note' }, `Worth mentioning: ${j.business.notable}`) : null),
-        j.angle ? h('div', { class: 'card stack' }, h('h3', {}, 'Your angle'), h('p', {}, j.angle), h('p', { class: 'note' }, `For: ${j.sells || 'your offer'}`)) : null,
-        h('div', { class: 'card stack' }, h('h3', {}, 'Likely pains'), h('p', { class: 'note' }, 'These are guesses from their website, not facts. Confirm them on the call.'),
-          j.pains.map((x) => h('div', { class: 'pain' }, h('b', {}, x.pain), h('span', { class: 'note' }, x.why)))),
-        h('div', { class: 'card stack' },
-          h('div', { class: 'row-between' }, h('h3', {}, 'Opener'), h('button', { class: 'btn ghost sm', type: 'button', onclick: () => copyText(j.opener) }, 'Copy')),
-          h('div', { class: 'quote' }, j.opener),
-          h('div', { class: 'row-between' }, h('h3', {}, 'Short script'), h('button', { class: 'btn ghost sm', type: 'button', onclick: () => copyText(scriptText, 'Script copied.') }, 'Copy')),
-          h('div', { class: 'quote script' }, j.script.map((l) => h('p', {}, l)))),
-        h('div', { class: 'card stack' }, h('h3', {}, 'Ask these'), h('ul', { class: 'stack', style: { margin: 0, paddingLeft: '20px' } }, j.questions.map((q) => h('li', {}, q))),
-          j.watch_out ? h('p', { class: 'note' }, `Watch out: ${j.watch_out}`) : null),
-        h('div', { class: 'row' },
-          plan.cur().log !== 'none' ? h('button', { class: 'btn', type: 'button', onclick: () => { db.kv.set('last_biz', j.business.name || label); goto('#/log'); } }, 'Log this call') : null,
-          h('button', { class: 'btn ghost', type: 'button', onclick: () => { db.kv.set('practice_ctx', { name: j.business.name || label, what_they_do: j.business.what_they_do, notable: j.business.notable, pains: j.pains.map((x) => x.why ? `${x.pain} (${x.why})` : x.pain), sells: j.sells || sellsIn.value.trim(), category: catIn.value, host: j.host }); goto('#/practice'); } }, 'Practice this call')));
+      out.replaceChildren(...prepResultNodes(j, label, { sells: sellsIn.value.trim(), category: catIn.value,
+        onLog: () => { db.kv.set('last_biz', j.business.name || label); goto('#/log'); } }));
     }
 
     function drawHist() {
@@ -1719,11 +1785,8 @@ const prepPage = (() => {
       btn.disabled = true; out.replaceChildren(); status.hidden = false;
       status.replaceChildren(h('span', { class: 'spin' }), 'Reading their website…');
       try {
-        const j = await apiPost('/api/prep', { url: raw || 'example.com', sells, category: catIn.value, pastedText: pasteIn.value.trim() || undefined, demo: opts.demo === true });
-        plan.addKeys('preps', [key]); drawMeter();
-        const list = db.kv.get('preps', []).filter((e) => e.host !== key);
-        list.unshift({ host: key, at: new Date().toISOString(), data: j });
-        db.kv.set('preps', list.slice(0, 30));
+        const j = await runPrep({ url: raw, sells, category: catIn.value, pastedText: pasteIn.value.trim(), demo: opts.demo === true, key });
+        drawMeter();
         status.hidden = true; renderPrep(j, key); drawHist();
       } catch (e) {
         status.hidden = false; status.replaceChildren(h('span', { class: 'err' }, e.message || 'Something went wrong.'));
@@ -1760,7 +1823,7 @@ const leadsPage = (() => {
 
     const q = h('input', { type: 'text', placeholder: 'roofers', autocomplete: 'off', value: db.kv.get('lead_q', '') });
     const loc = h('input', { type: 'text', placeholder: 'Aurora, CO', autocomplete: 'off', value: db.kv.get('lead_loc', '') });
-    let filter = 'any', openNow = false, next = null, shown = [], pages = 0;
+    let filter = 'any', openNow = false, next = null, shown = [], pages = 0, active = null;
     const chips = h('div', { class: 'chips-row' });
     const btn = h('button', { class: 'btn', type: 'button' }, 'Find leads');
     const more = h('button', { class: 'btn ghost', type: 'button', hidden: true }, 'More results');
@@ -1768,6 +1831,61 @@ const leadsPage = (() => {
     const list = h('div', { class: 'stack' });
     const meter = h('div', {});
     const saved = h('div', { class: 'stack' });
+    const right = h('div', { class: 'split-pane split-right', hidden: true });
+    const wrap = h('div', { class: 'split' });
+
+    function closePrep() {
+      active = null; right.hidden = true; right.replaceChildren();
+      wrap.classList.remove('on'); page.classList.remove('wide-split'); drawList();
+    }
+
+    /** Opens the prep panel beside the results, so the lead list stays where it is. */
+    async function openPrep(l) {
+      const site = safeHref(l.website);
+      if (!site) return;
+      active = l.id; drawList();
+      wrap.classList.add('on'); page.classList.add('wide-split'); right.hidden = false;
+      db.kv.set('last_biz', l.name);
+      const profile = await db.getProfile();
+      if (active !== l.id) return;
+      const key = l.demo ? l.id : hostOf(site);
+      const catIn = h('select', {}, CATEGORIES.map((c) => h('option', { value: c, selected: c === (db.kv.get('prep_cat', null) || (CATEGORIES.includes(profile.category) ? profile.category : CATEGORIES[0])) }, c)));
+      const sellsIn = h('input', { type: 'text', maxlength: '120', autocomplete: 'off', placeholder: 'e.g. websites for local businesses, $200 + $200/mo', value: db.kv.get('prep_sells', null) ?? (profile.sells || '') });
+      const pasteIn = h('textarea', { rows: 6, maxlength: '24000', placeholder: 'Open their website, select all, copy, and paste it here. Used instead of reading the site.' });
+      const pasteBox = h('details', { class: 'paste-box' }, h('summary', {}, 'Site will not load? Paste the site text instead'), h('div', { class: 'stack', style: { marginTop: '10px' } }, pasteIn, h('p', { class: 'note' }, 'Only used for this prep and not saved.')));
+      const status = h('div', { class: 'status', hidden: true });
+      const out = h('div', { class: 'stack' });
+      const go = h('button', { class: 'btn', type: 'button' }, 'Prepare my call');
+
+      async function run() {
+        const sells = sellsIn.value.trim();
+        if (!sells) { sellsIn.setAttribute('aria-invalid', 'true'); sellsIn.focus(); toast('Say what you are selling first.'); return; }
+        sellsIn.removeAttribute('aria-invalid');
+        db.kv.set('prep_sells', sells); db.kv.set('prep_cat', catIn.value);
+        if (!plan.gate('preps', key)) return;
+        go.disabled = true; out.replaceChildren(); status.hidden = false;
+        status.replaceChildren(h('span', { class: 'spin' }), 'Reading their website…');
+        try {
+          const j = await runPrep({ url: site, sells, category: catIn.value, pastedText: pasteIn.value.trim(), demo: l.demo === true, key });
+          status.hidden = true;
+          out.replaceChildren(...prepResultNodes(j, l.name, { sells, category: catIn.value, onLog: () => quickLog(l.name) }));
+        } catch (e) {
+          status.replaceChildren(h('span', { class: 'err' }, e.message || 'Something went wrong.'));
+          if (!pasteIn.value.trim()) pasteBox.open = true;
+        } finally { go.disabled = false; }
+      }
+      go.addEventListener('click', run);
+      sellsIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') run(); });
+
+      right.replaceChildren(
+        h('div', { class: 'row-between' }, h('h2', { class: 'sec-title' }, l.name), h('button', { class: 'btn ghost sm', type: 'button', onclick: closePrep }, 'Close')),
+        h('div', { class: 'card stack' },
+          h('div', { class: 'form-grid' }, h('label', { class: 'field' }, 'Category', catIn), h('label', { class: 'field' }, 'What exactly are you selling?', sellsIn)),
+          pasteBox, h('div', { class: 'row' }, go), status),
+        out);
+      if (matchMedia('(max-width: 900px)').matches) right.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (sellsIn.value.trim()) run(); else sellsIn.focus();
+    }
 
     function drawChips() {
       const F = [['any', 'Any'], ['has_site', 'Has website'], ['no_site', 'No website']];
@@ -1787,7 +1905,7 @@ const leadsPage = (() => {
       const isSaved = savedList().some((x) => x.id === l.id);
       const site = safeHref(l.website);
       const tel = l.phone ? l.phone.replace(/[^\d+]/g, '') : '';
-      return h('div', { class: 'card lead' },
+      return h('div', { class: 'card lead' + (active === l.id ? ' active' : '') },
         h('div', { class: 'lead-top' },
           h('div', {}, h('div', { class: 'lead-name' }, l.name), h('div', { class: 'note' }, l.address)),
           l.openNow === true ? h('span', { class: 'tag' }, 'Open now') : l.openNow === false ? h('span', { class: 'note' }, 'Closed now') : null),
@@ -1795,8 +1913,8 @@ const leadsPage = (() => {
           l.phone ? h('a', { href: `tel:${tel}` }, l.phone) : h('span', {}, 'No phone listed'),
           site ? h('a', { href: site, target: '_blank', rel: 'noopener noreferrer' }, hostOf(site)) : h('span', {}, 'No website')),
         h('div', { class: 'lead-actions' },
-          site ? h('button', { class: 'btn sm', type: 'button', onclick: () => { db.kv.set('seed_prep', { url: site, demo: l.demo === true, key: l.demo ? l.id : undefined }); db.kv.set('last_biz', l.name); goto('#/prep'); } }, 'Prep this call') : null,
-          plan.cur().log !== 'none' ? h('button', { class: 'btn ghost sm', type: 'button', onclick: () => { db.kv.set('last_biz', l.name); goto('#/log'); } }, 'Log a call') : null,
+          site ? h('button', { class: 'btn sm', type: 'button', onclick: () => openPrep(l) }, 'Prep this call') : null,
+          plan.cur().log !== 'none' ? h('button', { class: 'btn ghost sm', type: 'button', onclick: () => quickLog(l.name) }, 'Log a call') : null,
           h('button', { class: 'btn ghost sm', type: 'button', onclick: () => toggleSave(l) }, isSaved ? 'Saved ✓' : 'Save')));
     }
     function drawList() { list.replaceChildren(...shown.map(leadCard)); }
@@ -1861,10 +1979,14 @@ const leadsPage = (() => {
     page.append(
       h('h1', { class: 'sec-title' }, 'Lead finder'),
       h('p', { class: 'sub' }, 'Test source. See the note in api/leads.js before using this with customers.'),
-      h('div', { class: 'card stack' },
-        h('div', { class: 'form-grid' }, h('label', { class: 'field' }, 'Business type', q), h('label', { class: 'field' }, 'Place', loc)),
-        chips, h('div', { class: 'row' }, btn)),
-      status, list, h('div', { class: 'row' }, more), saved);
+      wrap);
+    wrap.append(
+      h('div', { class: 'split-pane' },
+        h('div', { class: 'card stack' },
+          h('div', { class: 'form-grid' }, h('label', { class: 'field' }, 'Business type', q), h('label', { class: 'field' }, 'Place', loc)),
+          chips, h('div', { class: 'row' }, btn)),
+        status, list, h('div', { class: 'row' }, more), saved),
+      right);
     drawChips(); drawMeter(); drawSaved();
     return {};
   }
@@ -1919,9 +2041,7 @@ const logPage = (() => {
 
     function add(outcome, amt) {
       const name = biz.value.trim();
-      const row = { id: db.uid(), at: new Date().toISOString(), business: name || 'Unnamed call', outcome, amount: outcome === 'sale' ? amt || 0 : 0, note: note ? note.value.trim() : '' };
-      db.kv.set('log', [row, ...entries()].slice(0, 500));
-      db.kv.set('last_biz', name);
+      addLogRow({ business: name, outcome, amount: amt, note: note ? note.value.trim() : '' });
       biz.value = ''; if (note) note.value = ''; amount.value = ''; saleRow.hidden = true;
       toast(`Logged: ${label(outcome)}.`); draw();
     }
