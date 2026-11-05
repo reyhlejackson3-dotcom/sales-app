@@ -1,0 +1,15 @@
+{
+  "outputDirectory": "public",
+  "functions": {
+    "api/*.js": { "maxDuration": 60 }
+  },
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Permissions-Policy", "value": "microphone=(self)" }
+      ]
+    }
+  ]
+}
